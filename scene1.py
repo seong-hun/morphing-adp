@@ -5,6 +5,8 @@ which are both desgined to stabilize the morphing aircraft
 at each trim points.
 """
 import os
+import shutil
+import sys
 import numpy as np
 
 import fym.logging as logging
@@ -16,10 +18,10 @@ from fym.models import aircraft
 INITIAL_PERTURB = np.array([[2, np.deg2rad(0), 0, np.deg2rad(-3)]]).T
 ETA1 = (1, 0)  # Loiter
 ETA2 = (0, 1)  # Dash
-LQR_Q1 = np.diag([1, 1, 1, 1, 1, 1])
-LQR_R1 = np.diag([1, 1])
-LQR_Q2 = np.diag([1, 1, 1, 1, 1, 1])
-LQR_R2 = np.diag([1, 1])
+LQR_Q1 = np.diag([0.1, 1, 1, 1, 10, 1])
+LQR_R1 = np.diag([1, 100])
+LQR_Q2 = np.diag([1, 1, 1, 1, 10, 1])
+LQR_R2 = np.diag([1, 100])
 
 # Morphing actuator
 TAU_MORPHING = 2  # sec
@@ -126,6 +128,7 @@ class Env(BaseEnv):
 
         # Control
         u, deltc = self.ctrl(x, tx, eta)
+        cu, ceta = self.clipping(u, eta)
 
         # Morping command
         etac = self.morphing_ctrl(t)
@@ -133,8 +136,8 @@ class Env(BaseEnv):
         return dict(
             time=t,
             state=x,
-            control=u,
-            eta=eta,
+            control=cu,
+            eta=ceta,
             etac=etac,
             deltc=deltc,
         )
@@ -145,13 +148,26 @@ class Env(BaseEnv):
         eta = self.morphing_actuator.state
 
         u, deltc = self.ctrl(x, tx, eta)
+        cu, ceta = self.clipping(u, eta)
 
         # Morping command
         etac = self.morphing_ctrl(t)
 
-        self.plane.dot = self.plane.deriv(x, u, eta)
+        self.plane.dot = self.plane.deriv(x, cu, ceta)
         self.thrust_actuator.set_dot(deltc)
         self.morphing_actuator.set_dot(etac)
+
+    def clipping(self, u, eta):
+        tlim = self.plane.control_limits["delt"]
+        elim = self.plane.control_limits["dele"]
+        eta1lim = self.plane.control_limits["eta1"]
+        eta2lim = self.plane.control_limits["eta2"]
+        ulim = np.vstack((tlim, elim)).T[..., None]
+        etalim = np.vstack((eta1lim, eta2lim)).T[..., None]
+
+        cu = np.clip(u, *ulim)
+        ceta = np.clip(eta, *etalim)
+        return cu, ceta
 
     def deriv(self, ax, au, eta):
         x, tx = ax[:4], ax[4:]
@@ -321,10 +337,19 @@ if __name__ == "__main__":
     env = Env()
 
     ctrls = {
-        "cgain1": ConstantGain(env.trimax1, env.trimau1, env.K1),
-        "cgain2": ConstantGain(env.trimax1, env.trimau1, env.K2),
+        "fixed_xu1_K1": ConstantGain(env.trimax1, env.trimau1, env.K1),
+        "fixed_xu1_K2": ConstantGain(env.trimax1, env.trimau1, env.K2),
+        "fixed_xu2_K1": ConstantGain(env.trimax2, env.trimau2, env.K1),
+        "fixed_xu2_K2": ConstantGain(env.trimax2, env.trimau2, env.K2),
         "interp": InterpGain(env)
     }
+
+    if os.path.exists("data"):
+        if input(
+                f"Delete \"data\"? [Y/n]: ") in ["", "Y", "y"]:
+            shutil.rmtree("data")
+        else:
+            sys.exit()
 
     morphing_ctrl = Switching(env, seq=[0, 20])
     env.set_morphing_ctrl(morphing_ctrl)
@@ -338,6 +363,7 @@ if __name__ == "__main__":
         env.logger = logging.Logger(path=path)
         env.reset()
         while True:
+            env.render()
             done = env.step()
             if done:
                 break
@@ -349,23 +375,40 @@ if __name__ == "__main__":
 
     scenepath = os.path.join("data", "scene1")
     pathlist = glob(os.path.join(scenepath, "*.h5"))
-    cnamelist = ["interp", "cgain1", "cgain2"]
+    # cnamelist = [
+    #     "interp",
+    #     "fixed_xu1_K1",
+    #     "fixed_xu1_K2",
+    #     "fixed_xu2_K1",
+    #     "fixed_xu2_K2",
+    # ]
     options = dict(
-        cgain1=dict(
+        fixed_xu1_K1=dict(
             color="k",
             ls="--",
-            label="Gain 1",
+            label="Fixed trim 1, gain 1",
         ),
-        cgain2=dict(
+        fixed_xu1_K2=dict(
+            color="g",
+            ls="--",
+            label="Fixed trim 1, gain 2",
+        ),
+        fixed_xu2_K1=dict(
             color="k",
             ls="-.",
-            label="Gain 2",
+            label="Fixed trim 2, gain 1",
+        ),
+        fixed_xu2_K2=dict(
+            color="g",
+            ls="-.",
+            label="Fixed trim 2, gain 2",
         ),
         interp=dict(
             color="r",
-            label="Interpolate",
+            label="Interpolated",
         ),
     )
+    cnamelist = options.keys()
 
     datalist = {}
     for p in pathlist:
